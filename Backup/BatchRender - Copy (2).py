@@ -1,0 +1,1614 @@
+"""
+This script is an extended functionality version of the standard 3ds Max batch render dialog.
+
+It adds:
+- Multi-row editing such as renaming and deleting
+- The ability to move rows up/down (render order)
+- V-Ray layer presets to be applied before rendering
+- Better output path control (base output path + row name + frame #).
+
+Feature wishlist:
+- Render start/end scripts
+- Change frame range override to string
+"""
+
+APP_NAME = 'Alternate Batch Render'
+APP_VERSION = '1.0.0'  # Semantic Versioning https://semver.org/
+AUTHOR = 'Logan Carrozza w/ assistance of GPT-3'
+
+
+import os
+import json
+
+from PySide2.QtWidgets import *
+from PySide2.QtCore import *
+from pymxs import runtime as rt
+from datetime import datetime
+import time
+from functools import partial
+import uuid
+
+
+class GenericDialog(QDialog):
+    def __init__(self, title, message, buttons, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setFixedWidth(250)
+
+        # Message label
+        message_label = QLabel(message)
+        message_label.setWordWrap(True)
+        message_label.setContentsMargins(10, 5, 10, 10)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        for button_text, button_result in buttons:
+            button = QPushButton(button_text)
+            button.setFixedWidth(75)
+            button.clicked.connect(partial(self.accept_with_result, button_result))
+            button_layout.addWidget(button)
+
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(message_label)
+        main_layout.addLayout(button_layout)
+
+        self.setLayout(main_layout)
+
+        if parent:
+            self.center_on_parent(parent)
+
+    def center_on_parent(self, parent):
+        parent_geometry = parent.geometry()
+        dialog_geometry = self.geometry()
+
+        center_x = parent_geometry.x() + (parent_geometry.width() - dialog_geometry.width()) // 2
+        center_y = parent_geometry.y() + (parent_geometry.height() - dialog_geometry.height()) // 2
+
+        self.setGeometry(center_x, center_y, dialog_geometry.width(), dialog_geometry.height())
+
+    def accept_with_result(self, result):
+        self.done(result)
+
+
+class TruncateDelegateRight(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        # Get the text and rectangle
+        text = index.data(Qt.DisplayRole)
+        rect = option.rect
+
+        # Truncate the text and adjustment ellipsis
+        elided_text = option.fontMetrics.elidedText(text, Qt.ElideRight, rect.adjusted(0, 0, -5, 0).width())
+
+        # Draw the truncated text
+        painter.drawText(rect.adjusted(5, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, elided_text)
+
+
+class TruncateDelegateMiddle(QStyledItemDelegate):
+    def paint(self, painter, option, index):
+        # Get the text and rectangle
+        text = index.data(Qt.DisplayRole)
+        rect = option.rect
+
+        # Truncate the text and adjustment ellipsis
+        elided_text = option.fontMetrics.elidedText(text, Qt.ElideMiddle, rect.adjusted(0, 0, -5, 0).width())
+
+        # Draw the truncated text
+        painter.drawText(rect.adjusted(5, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, elided_text)
+
+
+class CustomTableWidget(QTableWidget):
+    def __init__(self):
+        super().__init__()
+
+    def setCellData(self, row, column, display_value, hidden_value):
+        item = CustomTableWidgetItem(display_value, hidden_value)
+        self.setItem(row, column, item)
+
+    def getHiddenValue(self, row, column):
+        item = self.item(row, column)
+        if isinstance(item, CustomTableWidgetItem):
+            return item.hidden_value
+        else:
+            return None
+
+
+class CustomTableWidgetItem(QTableWidgetItem):
+    def __init__(self, display_value, hidden_value):
+        super().__init__(display_value)
+        self.hidden_value = hidden_value
+
+
+class BatchRenderDialog(QDialog):
+    def __init__(self, parent=None):
+        super(BatchRenderDialog, self).__init__(parent)
+        # App settings
+        self.setWindowTitle(f"Batch Render {APP_VERSION}")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setGeometry(100, 100, 1000, 500)
+        self.restoreWindowSettings()
+
+        # Log verbose settings
+        self.log_functions = False
+        self.log_major_actions = True
+        self.log_minor_actions = False
+
+        # Initialize variable default
+        self.batchRenderSettings = 'batchRenderSettings'  # Can't contain spaces
+        self.previously_selected = None
+        self.system_modified = False
+        self.default_text = "-----------------------------------------"
+        self.default_path_text = "Default Path + Name"
+
+        # Buttons
+        self.btnAdd = QPushButton("Add", self)
+        self.btnDuplicate = QPushButton("Duplicate", self)
+        self.btnDelete = QPushButton("Delete", self)
+        self.btnUp = QPushButton(u"\u25b2", self)
+        self.btnDown = QPushButton(u"\u25bc", self)
+
+        # Create a widget to hold the buttons
+        self.buttonWidget = QWidget(self)
+        self.buttonWidget.setFixedWidth(300)
+
+        # Layout for the buttons
+        buttonLayout = QHBoxLayout(self.buttonWidget)
+        buttonLayout.addWidget(self.btnAdd)
+        buttonLayout.addWidget(self.btnDuplicate)
+        buttonLayout.addWidget(self.btnDelete)
+        buttonLayout.addWidget(self.btnUp)
+        buttonLayout.addWidget(self.btnDown)
+
+        # Default Output Path field
+        self.lblDefaultOutputPath = QLabel("Default Output Path:", self)
+        self.lblDefaultOutputPath.setAlignment(Qt.AlignRight)
+        self.txtDefaultOutputPath = QLineEdit(self)
+        self.renderOutput = rt.GetDir(rt.Name("renderoutput"))
+        self.txtDefaultOutputPath.setText(self.renderOutput)
+
+        # Browse button
+        self.btnDefaultBrowse = QPushButton("...", self)
+        self.btnDefaultBrowse.setFixedWidth(30)
+
+        # Clear button
+        self.btnDefaultClear = QPushButton("X", self)
+        self.btnDefaultClear.setFixedWidth(30)
+
+        # Layout for Default Output Path
+        self.defaultOutputPathWidget = QWidget(self)
+        defaultOutputPathLayout = QHBoxLayout(self.defaultOutputPathWidget)
+        defaultOutputPathLayout.addWidget(self.lblDefaultOutputPath)
+        defaultOutputPathLayout.addWidget(self.btnDefaultBrowse)
+        defaultOutputPathLayout.addWidget(self.txtDefaultOutputPath)
+        defaultOutputPathLayout.addWidget(self.btnDefaultClear)
+
+        # Table
+        self.tableWidget = CustomTableWidget()  #QTableWidget(self)
+        self.tableWidget.setColumnCount(10)
+        self.column_names = ["Use", "Name", "Camera", "Output Path", "Range", "Resolution",
+                             "Pixel Aspect", "Scene State", "Render Preset", "Layer Preset"]
+        self.non_editable_columns = [0, 2, 4, 5, 6, 7, 8, 9]
+        self.resisable_columns = range(1, len(self.column_names) + 1)  # All except first column
+        self.column_minimum_width = 100
+        self.tableWidget.setHorizontalHeaderLabels(self.column_names)
+        initial_row_height = self.tableWidget.rowHeight(0)
+        self.tableWidget.verticalHeader().setDefaultSectionSize(initial_row_height)
+        self.tableWidget.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        self.tableWidget.setItemDelegate(TruncateDelegateRight(self))  # Truncate style
+        self.tableWidget.setItemDelegateForColumn(3, TruncateDelegateMiddle(self))
+        self.tableWidget.setSelectionBehavior(QAbstractItemView.SelectionBehavior(1))
+
+        # Table - Checkbox column
+        self.tableWidget.setItemDelegateForColumn(0, QStyledItemDelegate())
+        self.tableWidget.setColumnWidth(0, 1)
+        header = self.tableWidget.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+
+        # Selected Parameters GroupBox
+        self.groupBoxSelectedParams = QGroupBox("Selected Batch Render Parameters", self)
+
+        # Override checkboxes
+        self.frameRangeOverride = QCheckBox("", self.groupBoxSelectedParams)
+        self.imageSizeOverride = QCheckBox("", self.groupBoxSelectedParams)
+        self.pixelAspectOverride = QCheckBox("", self.groupBoxSelectedParams)
+        self.outputPathOverride = QCheckBox("", self.groupBoxSelectedParams)
+
+        # Override Frame Start
+        self.lblFrameStart = QLabel("Frame Start:", self.groupBoxSelectedParams)
+        self.lblFrameStart.setAlignment(Qt.AlignRight)
+        self.spnFrameStart = QSpinBox(self.groupBoxSelectedParams)
+        self.spnFrameStart.setFixedWidth(100)
+        self.spnFrameStart.setMinimum(-9999)
+
+        # Override Frame End
+        self.lblFrameEnd = QLabel("Frame End:", self.groupBoxSelectedParams)
+        self.lblFrameEnd.setAlignment(Qt.AlignRight)
+        self.spnFrameEnd = QSpinBox(self.groupBoxSelectedParams)
+        self.spnFrameEnd.setFixedWidth(100)
+        self.spnFrameEnd.setMaximum(9999)
+
+        # Override Image Width
+        self.lblWidth = QLabel("Width:", self.groupBoxSelectedParams)
+        self.lblWidth.setAlignment(Qt.AlignRight)
+        self.spnWidth = QSpinBox(self.groupBoxSelectedParams)
+        self.spnWidth.setFixedWidth(100)
+        self.spnWidth.setMaximum(9999)
+        self.spnWidth.setValue(rt.renderHeight)
+
+        # Override Image Height
+        self.lblHeight = QLabel("Height:", self.groupBoxSelectedParams)
+        self.lblHeight.setAlignment(Qt.AlignRight)
+        self.spnHeight = QSpinBox(self.groupBoxSelectedParams)
+        self.spnHeight.setFixedWidth(100)
+        self.spnHeight.setMaximum(9999)
+        self.spnHeight.setValue(rt.renderWidth)
+
+        # Override Pixel Aspect
+        self.lblPixelAspect = QLabel("Pixel Aspect:", self.groupBoxSelectedParams)
+        self.lblPixelAspect.setAlignment(Qt.AlignRight)
+        self.spnPixelAspect = QDoubleSpinBox(self.groupBoxSelectedParams)
+        self.spnPixelAspect.setFixedWidth(100)
+        self.spnPixelAspect.setMaximum(2)
+        self.spnPixelAspect.setSingleStep(0.1)
+        self.spnPixelAspect.setValue(1.0)
+
+        # Name field
+        self.lblName = QLabel("Name:", self.groupBoxSelectedParams)
+        self.lblName.setAlignment(Qt.AlignRight)
+        self.txtName = QLineEdit(self.groupBoxSelectedParams)
+        self.txtName.setFixedWidth(250)
+
+        # Output Path field
+        self.lblOutputPath = QLabel("Output Path:", self.groupBoxSelectedParams)
+        self.lblOutputPath.setAlignment(Qt.AlignRight)
+        self.txtOutputPath = QLineEdit(self.groupBoxSelectedParams)
+
+        # Browse button
+        self.btnBrowse = QPushButton("...", self.groupBoxSelectedParams)
+        self.btnBrowse.setFixedWidth(30)
+
+        # Clear button
+        self.btnClear = QPushButton("X", self.groupBoxSelectedParams)
+        self.btnClear.setFixedWidth(30)
+
+        # Camera Dropdown
+        self.lblCamera = QLabel("Camera:", self.groupBoxSelectedParams)
+        self.lblCamera.setAlignment(Qt.AlignRight)
+        self.cmbCamera = QComboBox(self.groupBoxSelectedParams)
+        self.cmbCamera.setFixedWidth(250)
+        cameras = [(camera.name, rt.getHandleByAnim(camera)) for camera in rt.cameras if hasattr(camera, 'type')]
+
+        # Sort cameras by name
+        cameras.sort(key=lambda x: (x[0], x[1]))
+        for camera_name, camera in cameras:
+            self.cmbCamera.addItem(camera_name, camera)
+        print(cameras)
+
+        # Scene State Dropdown
+        self.lblSceneState = QLabel("Scene State:", self.groupBoxSelectedParams)
+        self.lblSceneState.setAlignment(Qt.AlignRight)
+        self.cmbSceneState = QComboBox(self.groupBoxSelectedParams)
+        self.cmbSceneState.setFixedWidth(250)
+        self.cmbSceneState.addItem(self.default_text)
+        for x in range(rt.sceneStateMgr.GetCount()):
+            state_set = rt.sceneStateMgr.GetSceneState(x + 1)
+            self.cmbSceneState.addItem(state_set)
+
+        # Render Preset Dropdown
+        self.lblPreset = QLabel("Render Preset:", self.groupBoxSelectedParams)
+        self.lblPreset.setAlignment(Qt.AlignRight)
+        self.cmbPreset = QComboBox(self.groupBoxSelectedParams)
+        self.cmbPreset.setFixedWidth(250)
+        preset_dir = os.listdir(rt.GetDir(rt.Name("renderPresets")))
+        self.cmbPreset.addItem(self.default_text)
+        for state_set in preset_dir:
+            self.cmbPreset.addItem(state_set)
+
+        # Layer Preset Dropdown
+        self.lblLayerPreset = QLabel("Layer Preset:", self.groupBoxSelectedParams)
+        self.lblLayerPreset.setAlignment(Qt.AlignRight)
+        self.cmbLayerPreset = QComboBox(self.groupBoxSelectedParams)
+        self.cmbLayerPreset.setFixedWidth(250)
+        layerPreset_dir = os.listdir(rt.GetDir(rt.Name("vpost")))
+        self.cmbLayerPreset.addItem(self.default_text)
+        for state_set in layerPreset_dir:
+            self.cmbLayerPreset.addItem(state_set)
+
+        # Layout for the group box (part 1)
+        groupBoxLayout1 = QGridLayout()
+        groupBoxLayout1.addWidget(self.frameRangeOverride, 1, 0)
+        groupBoxLayout1.addWidget(self.lblFrameStart, 1, 1)
+        groupBoxLayout1.addWidget(self.spnFrameStart, 1, 2)
+        groupBoxLayout1.addWidget(self.lblFrameEnd, 1, 3)
+        groupBoxLayout1.addWidget(self.spnFrameEnd, 1, 4)
+        # Add resize spacer to keep elements tot the left
+        groupBoxLayout1.addItem(QSpacerItem(1, 1, QSizePolicy.Expanding), 1, 4)
+        groupBoxLayout1.addWidget(self.imageSizeOverride, 2, 0)
+        groupBoxLayout1.addWidget(self.lblWidth, 2, 1)
+        groupBoxLayout1.addWidget(self.spnWidth, 2, 2)
+        groupBoxLayout1.addWidget(self.lblHeight, 2, 3)
+        groupBoxLayout1.addWidget(self.spnHeight, 2, 4)
+
+        groupBoxLayout1.addWidget(self.pixelAspectOverride, 3, 0)
+        groupBoxLayout1.addWidget(self.lblPixelAspect, 3, 3)
+        groupBoxLayout1.addWidget(self.spnPixelAspect, 3, 4)
+
+        # Layout for the group box (part 2)
+        groupBoxLayout2 = QGridLayout()
+        groupBoxLayout2.addWidget(self.outputPathOverride, 1, 0)
+        groupBoxLayout2.addWidget(self.lblOutputPath, 1, 1)
+        groupBoxLayout2.addWidget(self.btnBrowse, 1, 2)
+        groupBoxLayout2.addWidget(self.txtOutputPath, 1, 3)
+        groupBoxLayout2.addWidget(self.btnClear, 1, 4)
+
+        # Layout for the group box (part 3)
+        groupBoxLayout3 = QGridLayout()
+        groupBoxLayout3.addWidget(self.lblName, 2, 0)
+        groupBoxLayout3.addWidget(self.txtName, 2, 1, 1, 1)
+        groupBoxLayout3.addItem(QSpacerItem(1, 1, QSizePolicy.Expanding), 2,
+                                3)  # Add resize spacer to keep elements to the left
+        groupBoxLayout3.addWidget(self.lblCamera, 3, 0)
+        groupBoxLayout3.addWidget(self.cmbCamera, 3, 1, 1, 1)
+        groupBoxLayout3.addWidget(self.lblSceneState, 4, 0)
+        groupBoxLayout3.addWidget(self.cmbSceneState, 4, 1, 1, 1)
+        groupBoxLayout3.addWidget(self.lblPreset, 5, 0)
+        groupBoxLayout3.addWidget(self.cmbPreset, 5, 1, 1, 1)
+        groupBoxLayout3.addWidget(self.lblLayerPreset, 6, 0)
+        groupBoxLayout3.addWidget(self.cmbLayerPreset, 6, 1, 1, 1)
+
+        # Combine groupBoxLayout1 and groupBoxLayout2 vertically
+        vbox = QVBoxLayout(self.groupBoxSelectedParams)
+        vbox.addLayout(groupBoxLayout1)
+        vbox.addLayout(groupBoxLayout2)
+        vbox.addLayout(groupBoxLayout3)
+
+        # Export to batt and render Buttons
+        btnButton_shown = False  ### Disabled button since IDK how to implement the function right now.
+        self.btnBatt = QPushButton("Export to.bat", self)
+        self.btnBatt.setFixedWidth(90)
+        self.btnBatt.setVisible(btnButton_shown)  ### Disabled (see comment above)
+        self.btnRender = QPushButton("Render", self)
+        self.btnRender.setFixedWidth(90)
+
+        # Create a widget to hold the buttons
+        self.renderWidget = QWidget(self)
+        if btnButton_shown:
+            width = 200
+        else:
+            width = 100
+        self.renderWidget.setFixedWidth(width)
+
+        # Layout for the buttons
+        renderLayout = QHBoxLayout(self.renderWidget)
+        renderLayout.addWidget(self.btnBatt)
+        renderLayout.addWidget(self.btnRender)
+
+        # Main layout
+        mainLayout = QVBoxLayout(self)
+        mainLayout.addWidget(self.defaultOutputPathWidget, 0)  # Align buttons to the top left
+        mainLayout.addWidget(self.buttonWidget, alignment=Qt.AlignTop | Qt.AlignLeft)  # Align buttons to the top left
+        mainLayout.addWidget(self.tableWidget, 1)
+        mainLayout.addWidget(self.groupBoxSelectedParams, 0)
+        mainLayout.addWidget(self.renderWidget, alignment=Qt.AlignTop | Qt.AlignRight)  # Align buttons to the top left
+
+        # Binds - action buttons
+        self.btnDefaultBrowse.clicked.connect(self.browse_default_output_path)
+        self.btnDefaultClear.clicked.connect(self.clear_default_output_path)
+        self.btnAdd.clicked.connect(self.add_row)
+        self.btnAdd.setFocusPolicy(Qt.NoFocus)  # Ignore ENTER and RETURN keys
+        self.btnDuplicate.clicked.connect(self.duplicate_row)
+        self.btnDelete.clicked.connect(self.delete_row)
+        self.btnUp.clicked.connect(self.move_up)
+        self.btnDown.clicked.connect(self.move_down)
+        self.btnBrowse.clicked.connect(self.browse_output_path)
+        self.btnClear.clicked.connect(self.clear_output_path)
+        self.btnRender.clicked.connect(self.start_batch_render)  # batch_render
+
+        # Binds - Windows Events
+        self.finished.connect(self.on_close)
+
+        # Disable overrides (default state)
+        self.toggle_override_fields(False)
+
+        # Restore dialog info
+        try:
+            self.restoreDialogData()
+            self.update_element_values()
+        except RuntimeError as e:
+            print(e)
+
+        # Bind - table
+        self.tableWidget.itemSelectionChanged.connect(self.table_selection_changed)
+        self.tableWidget.itemChanged.connect(self.table_cell_changed)
+
+        # Binds - parameters changed
+        self.outputPathOverride.stateChanged.connect(self.output_path_override_toggled)
+        self.frameRangeOverride.stateChanged.connect(self.frame_range_override_toggled)
+        self.imageSizeOverride.stateChanged.connect(self.image_size_override_toggled)
+        self.pixelAspectOverride.stateChanged.connect(self.pixel_aspect_override_toggled)
+        self.spnFrameStart.valueChanged.connect(self.frame_range_changed)
+        self.spnFrameEnd.valueChanged.connect(self.frame_range_changed)
+        self.spnWidth.valueChanged.connect(self.resolution_changed)
+        self.spnHeight.valueChanged.connect(self.resolution_changed)
+        self.spnPixelAspect.valueChanged.connect(self.pixel_aspect_changed)
+        self.txtName.textChanged.connect(self.name_changed)
+        self.txtOutputPath.textChanged.connect(self.output_path_changed)
+        self.cmbCamera.currentIndexChanged.connect(self.camera_changed)
+        self.cmbSceneState.currentIndexChanged.connect(self.scene_state_changed)
+        self.cmbPreset.currentIndexChanged.connect(self.preset_changed)
+        self.cmbLayerPreset.currentIndexChanged.connect(self.layer_preset_changed)
+
+    """Dialog Functions"""
+
+    def warn_render_settings_open(self, message: str, buttons: dict = None):
+        """
+        Display a warning message with buttons.
+        :param message: Message to display
+        :param buttons: Buttons names (keys) and their return value
+        :return: Button press value OR None if window closed.
+        """
+
+        # Default buttons
+        if not buttons:
+            buttons = {'Yes': True, 'No': False}
+
+        # Construct buttons and their return value
+        button_constructor = []
+        button_results = {}
+        for x, (key, value) in enumerate(buttons.items()):
+            x += 1
+            button_constructor.append((key, x))
+            button_results[x] = [key, value]
+        buttons = button_constructor
+
+        # Display message
+        dialog = GenericDialog(
+            title="Warning!",
+            message=message,
+            buttons=buttons,
+            parent=self
+        )
+
+        # Return result
+        result = dialog.exec_()
+        if result == QDialog.Rejected:
+            #if self.log_minor_actions:
+            print("User closed window.")
+            result = None
+        else:
+            #if self.log_minor_actions:
+            print(f"User clicked a '{button_results[result][0]}'")
+            result = button_results[result][1]
+
+        return result
+
+    def keyPressEvent(self, event):
+        """Capture and ignore all key press events.
+
+        This is used so that return key event does not trigger the exit button
+        from the dialog. We need to allow the return key to be used in filters
+        in the widget."""
+        if self.log_major_actions:
+            print("Ignoring Enter/Return key")
+
+    def on_close(self):
+        # Do things on window close
+        self.saveDialogData()
+
+    def restoreWindowSettings(self):
+        # Restore window position & size
+        settings = QSettings(AUTHOR, APP_NAME)
+        self.restoreGeometry(settings.value("geometry"))
+
+    def restoreDialogData(self):
+        try:
+            # Retrieve table data
+            data = rt.globalVars.get(rt.name(self.batchRenderSettings))
+            data = json.loads(data)
+            # print(data)
+
+            for row_index, row in enumerate(data["table_data"]):
+                # print(row)
+                self.add_row()
+                for column_index, column_name in enumerate(self.column_names):
+                    if column_name in row:
+                        try:  # For previous versions that didn't have hidden values
+                            value = row[column_name][0]
+                            hidden_value = row[column_name][1]
+                        except TypeError as e:
+                            value = row[column_name]
+                            hidden_value = None
+                        # print(column_name)
+                    else:
+                        # Catch for if new columns are added in new script version
+                        existing_item = self.tableWidget.cellWidget(row_index, column_index)
+                        if existing_item:
+                            value = False
+                        else:
+                            value = ''
+
+                    if type(value) is str:
+                        if hidden_value and type(hidden_value) is int:
+                            # If hidden value, use hidden value to get node from ID
+                            node = rt.getAnimByHandle(hidden_value)
+                            if node and node in rt.Cameras:
+                                value = node.name
+                            else:
+                                value = "ERROR"
+                                """ADD WARNING FOR WHEN CANT FIND NODE"""
+
+                        existing_item = self.tableWidget.item(row_index, column_index)
+                        new_item = QTableWidgetItem(existing_item)
+                        new_item.setText(value)
+                        self.tableWidget.setCellData(row_index, column_index, new_item, hidden_value)
+
+                    elif type(value) is bool:
+                        existing_item = self.tableWidget.cellWidget(row_index, column_index)
+                        existing_item.setChecked(value)
+                        self.tableWidget.setCellWidget(row_index, column_index, existing_item)
+
+            # Restore default output path
+            default_output_path = data['default_output_path']
+            if not default_output_path:
+                default_output_path = self.renderOutput
+            self.txtDefaultOutputPath.setText(default_output_path)
+
+            # Expand columns to fit column contents
+            self.table_resizeColumnToContents()
+
+            if self.log_major_actions:
+                print("Restored dialog data")
+        except KeyError as e:
+            print("Save data corrupt:")
+            print(e)
+
+    def saveDialogData(self):
+        # Save window position & size
+        settings = QSettings(AUTHOR, APP_NAME)
+        settings.setValue("geometry", self.saveGeometry())
+
+        # Get table data
+        table_data = []
+        for row_num in range(self.tableWidget.rowCount()):
+            # print('----------------------------------')
+            row_data = {}
+            for column_num in range(self.tableWidget.columnCount()):
+                column_name = self.tableWidget.horizontalHeaderItem(column_num).text()
+
+                item = self.tableWidget.item(row_num, column_num)
+                hidden_value = self.tableWidget.getHiddenValue(row_num, column_num)
+                item_cell = self.tableWidget.cellWidget(row_num, column_num)
+
+                if isinstance(item_cell, QCheckBox):
+                    val = item_cell.isChecked()
+                    # print(f'{column_name} = bool = {val}')
+                else:
+                    val = item.text()
+                    #print(f'{column_name} = text = {[val, hidden_value]}')
+
+                row_data[column_name] = [val, hidden_value]
+            table_data.append(row_data)
+            # print(row_data)
+
+        # Get default output path
+        default_output_path = self.txtDefaultOutputPath.text()
+
+        # Save data
+        data = str(json.dumps({'default_output_path': default_output_path, 'table_data': table_data}))
+        if self.log_major_actions:
+            print(data)
+        rt.batchRenderSettings = data
+        rt.persistents.make(rt.name(self.batchRenderSettings))
+
+    """General Functions """
+
+    def table_get_selected(self, item_index: int = 0):
+        selected_items = self.tableWidget.selectedItems()
+
+        if selected_items:
+            selected_items_int = [x.row() for x in selected_items]
+            # selected_items.sort()
+            combined_lists = list(zip(selected_items_int, selected_items))
+            sorted_lists = sorted(combined_lists, key=lambda x: x[0])
+
+            if self.log_minor_actions:
+                print("All selection: " + str(selected_items))
+                print("selection: " + str(selected_items))
+
+            if item_index is not None:
+                selected_items = sorted_lists[item_index]
+            else:
+                selected_items = sorted_lists
+        else:
+            selected_items = (None, None)
+
+        return selected_items
+
+    def table_selection_changed(self):
+        if self.log_functions:
+            print("table_selection_changed")
+
+        if not self.system_modified:
+            selected_items = self.table_get_selected()[0]
+            if self.log_major_actions:
+                display_selected = selected_items
+                if selected_items:
+                    display_selected = selected_items + 1
+                if not self.system_modified:
+                    print("Selected: Row " + str(display_selected))
+
+            if selected_items is not None:
+                self.previously_selected = selected_items
+                if self.log_minor_actions and not self.system_modified:
+                    print("Selected: Row " + str(self.previously_selected + 1))
+
+            elif self.previously_selected is not None:
+                if self.log_minor_actions and not self.system_modified:
+                    print("No element selected, but previous element selected")
+                self.system_modified = True
+                self.tableWidget.selectRow(self.previously_selected)
+
+            else:
+                if self.log_minor_actions and not self.system_modified:
+                    print("No element selected, and no previous element selected")
+                self.previously_selected = self.tableWidget.rowCount()
+                self.system_modified = True
+                self.tableWidget.selectRow(self.previously_selected)
+
+            self.system_modified = False
+            self.update_element_values()
+
+    def table_cell_changed(self, item):
+        if self.log_functions:
+            print("table_cell_changed")
+
+        if not self.system_modified:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            if self.log_major_actions:
+                print(f"[{current_time}] Table cell changed")
+            row = item.row()
+            col = item.column()
+            col_name = self.column_names[col]
+            value = item.text()
+
+            self.update_element_values()
+
+    def table_resizeColumnToContents(self, column=None):
+        if column == None:
+            columns = self.resisable_columns
+        elif type(column) is int:
+            columns = [column]
+        elif type(column) is str:
+            columns = [self.column_names.index(column)]
+        else:
+            raise ValueError
+
+        for col in columns:
+            self.tableWidget.resizeColumnToContents(col)
+            column_width = self.tableWidget.columnWidth(col)
+            self.tableWidget.setColumnWidth(col, column_width + 4)
+            if column_width < self.column_minimum_width:
+                self.tableWidget.setColumnWidth(col, self.column_minimum_width)
+
+    def update_element_values(self):
+        if self.log_functions:
+            print("update_element_values")
+
+        if not self.system_modified:
+            self.system_modified = True
+            selected_item = self.table_get_selected()[0]
+
+            if selected_item is not None:
+                default_values = ["Default", "", None]
+
+                # Set "Name"
+                name_value = self.tableWidget.item(selected_item, 1).text()
+                self.txtName.setText(name_value)
+
+                # Set "Camera"
+                value = self.tableWidget.item(selected_item, 2).text()
+                self.cmbCamera.setCurrentText(value)
+
+                # Set "Output Path"
+                value = self.tableWidget.item(selected_item, 3).text()
+                if value in [self.default_path_text, "", None]:
+                    path = self.txtDefaultOutputPath.text()
+                    value = os.path.join(str(path), name_value + ".exr")
+                    self.toggle_override_fields(False, 'Output Path')
+                else:
+                    self.toggle_override_fields(True, 'Output Path')
+                self.txtOutputPath.setText(value)
+
+                # Set "Frame Start" & "Frame End"
+                value = self.tableWidget.item(selected_item, 4).text()
+                if value in default_values:
+                    value = [rt.rendStart, rt.rendEnd]
+                    self.frameRangeOverride.setCheckState(Qt.Unchecked)
+                    self.toggle_override_fields(False, 'Frame Range')
+                else:
+                    value = value.split(":")
+                    self.frameRangeOverride.setCheckState(Qt.Checked)
+                    self.toggle_override_fields(True, 'Frame Range')
+                self.spnFrameStart.setValue(int(value[0]))
+                self.spnFrameEnd.setValue(int(value[1]))
+
+                # Set "Width" & "Height"
+                value = self.tableWidget.item(selected_item, 5).text()
+                if value in default_values:
+                    value = [rt.renderWidth, rt.renderHeight]
+                    self.imageSizeOverride.setCheckState(Qt.Unchecked)
+                    self.toggle_override_fields(False, 'Image Size')
+                else:
+                    value = value.split("x")
+                    self.imageSizeOverride.setCheckState(Qt.Checked)
+                    self.toggle_override_fields(True, 'Image Size')
+                self.spnWidth.setValue(int(value[0]))
+                self.spnHeight.setValue(int(value[1]))
+
+                # Set "Pixel Aspect"
+                value = self.tableWidget.item(selected_item, 6).text()
+                if value in default_values:
+                    value = rt.renderPixelAspect
+                    self.pixelAspectOverride.setCheckState(Qt.Unchecked)
+                    self.toggle_override_fields(False, 'Pixel Aspect')
+                else:
+                    self.pixelAspectOverride.setCheckState(Qt.Checked)
+                    self.toggle_override_fields(True, 'Pixel Aspect')
+                self.spnPixelAspect.setValue(float(value))
+
+                # Set "Scene State"
+                value = self.tableWidget.item(selected_item, 7).text()
+                if value:
+                    # value = value.text()
+                    # index = self.cmbSceneState.findText(value)
+                    self.cmbSceneState.setCurrentText(value)
+                else:
+                    self.cmbSceneState.setCurrentText(self.default_text)
+
+                # Set "Render Preset"
+                value = self.tableWidget.item(selected_item, 8).text()
+                if value:
+                    # value = value.text()
+                    # index = self.cmbPreset.findText(value)
+                    self.cmbPreset.setCurrentText(value)
+                else:
+                    self.cmbPreset.setCurrentText(self.default_text)
+
+                # Set "Layer Preset"
+                value = self.tableWidget.item(selected_item, 9).text()
+                if value:
+                    # value = value.text()
+                    # index = self.cmbLayerPreset.findText(value)
+                    self.cmbLayerPreset.setCurrentText(value)
+                else:
+                    self.cmbLayerPreset.setCurrentText(self.default_text)
+
+            self.system_modified = False
+
+    def toggle_override_fields(self, disable_fields: bool, fields: str = 'All'):
+        # if self.log_functions: print("toggle_override_fields")
+
+        system_modified = self.system_modified
+        self.system_modified = True
+
+        if disable_fields:
+            state_string = "Enabled"
+        else:
+            state_string = "Disabled"
+
+        # Disable/enable fields based on the state
+        if fields in ['Frame Range', 'All']:
+            # self.frameRangeOverride.setChecked(disable_fields)
+            self.lblFrameStart.setEnabled(disable_fields)
+            self.spnFrameStart.setEnabled(disable_fields)
+            self.lblFrameEnd.setEnabled(disable_fields)
+            self.spnFrameEnd.setEnabled(disable_fields)
+            if self.log_functions:
+                print(f"{state_string} Frame Range")
+        if fields in ['Image Size', 'All']:
+            # self.imageSizeOverride.setChecked(disable_fields)
+            self.lblWidth.setEnabled(disable_fields)
+            self.spnWidth.setEnabled(disable_fields)
+            self.lblHeight.setEnabled(disable_fields)
+            self.spnHeight.setEnabled(disable_fields)
+            if self.log_functions:
+                print(f"{state_string} Image Size")
+        if fields in ['Pixel Aspect', 'All']:
+            # self.pixelAspectOverride.setChecked(disable_fields)
+            self.lblPixelAspect.setEnabled(disable_fields)
+            self.spnPixelAspect.setEnabled(disable_fields)
+            if self.log_functions:
+                print(f"{state_string} Pixel Aspect")
+        if fields in ['Output Path', 'All']:
+            self.outputPathOverride.setChecked(disable_fields)
+            self.lblOutputPath.setEnabled(disable_fields)
+            self.btnBrowse.setEnabled(disable_fields)
+            self.txtOutputPath.setEnabled(disable_fields)
+            self.btnClear.setEnabled(disable_fields)
+            if self.log_functions:
+                print(f"{state_string} Output Path")
+
+        self.system_modified = system_modified
+
+    """Action functions when buttons pushed"""
+
+    def clear_default_output_path(self):
+        self.txtDefaultOutputPath.setText(self.renderOutput)
+
+    def browse_default_output_path(self):
+        # Open the 3ds Max Save Folder dialog
+        current_path = self.txtDefaultOutputPath.text()
+        if not os.path.exists(current_path):
+            current_path = self.renderOutput
+
+        folder_path = rt.getSavePath(
+            # caption="Select Folder Location",
+            initialDir=current_path
+        )
+
+        # Update the text field with the selected file path
+        if folder_path:
+            self.txtDefaultOutputPath.setText(folder_path)
+
+        return folder_path
+
+    def add_row(self):
+        self.system_modified = True
+
+        row_position = self.tableWidget.rowCount()
+        self.previously_selected = row_position
+        self.tableWidget.insertRow(row_position)
+
+        # Add checkbox to the first column
+        checkbox = QCheckBox()
+        checkbox.setChecked(True)
+        self.tableWidget.setCellWidget(row_position, 0, checkbox)
+
+        # You can populate the cells with default values if needed
+        for col in range(1, self.tableWidget.columnCount() - 2):
+            item = QTableWidgetItem("Default")
+            self.tableWidget.setItem(row_position, col, item)
+
+        # Default - Camera
+        default_camera = self.cmbCamera.itemText(0)
+        selected_node = rt.getNodeByName(default_camera)  # Get camera node
+        default_camera_ID = rt.getHandleByAnim(selected_node)  # Get camera node ID
+        default = QTableWidgetItem(default_camera)
+        col = self.column_names.index("Camera")
+        self.tableWidget.setCellData(row_position, col, default, default_camera_ID)  #setItem(row_position, col, default)
+
+        # Default - State, Render Preset, & Layer Preset
+        # State
+        default = QTableWidgetItem("")
+        col = self.column_names.index("Scene State")
+        self.tableWidget.setItem(row_position, col, default)
+        # Render Preset
+        default = QTableWidgetItem("")
+        col = self.column_names.index("Render Preset")
+        self.tableWidget.setItem(row_position, col, default)
+        # Layer Preset
+        default = QTableWidgetItem("")
+        col = self.column_names.index("Layer Preset")
+        self.tableWidget.setItem(row_position, col, default)
+
+        # Default - Output Path
+        path = self.txtDefaultOutputPath.text()
+        default = QTableWidgetItem(self.default_path_text)
+        col = self.column_names.index("Output Path")
+        self.tableWidget.setItem(row_position, col, default)
+
+        # Check if the current column is the one you want to make non-editable
+        for col in self.non_editable_columns:
+            item = self.tableWidget.item(row_position, col)
+            col_name = self.tableWidget.horizontalHeaderItem(col).text()
+            if item is not None:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        """
+        for col in range(self.tableWidget.columnCount() + 1):
+            item = self.tableWidget.item(row_position, col)
+            if col in self.non_editable_columns and item is not None:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        """
+
+        self.table_resizeColumnToContents()
+        self.system_modified = False
+        self.tableWidget.selectRow(row_position)
+        if self.log_major_actions:
+            print("New row added")
+
+    def duplicate_row(self):
+        self.system_modified = True
+
+        row_selected = self.table_get_selected()[0]
+        if row_selected is not None:
+            # Insert a new row below the selected row
+            row_new = row_selected + 1
+            self.tableWidget.insertRow(row_new)
+
+            # Duplicate the items from the selected row to the new row
+            for col in range(self.tableWidget.columnCount()):
+                item = self.tableWidget.item(row_selected, col)
+                item_cell = self.tableWidget.cellWidget(row_selected, col)
+
+                if isinstance(item_cell, QCheckBox):
+                    new_item = QCheckBox()
+                    new_item.setChecked(item_cell.isChecked())
+                    self.tableWidget.setCellWidget(row_new, col, new_item)
+                    # print("bool")
+                else:
+                    new_item = item.clone()
+                    self.tableWidget.setItem(row_new, col, new_item)
+                    # print("string")
+
+            # Update the selection to the new row
+            self.tableWidget.selectRow(row_new)
+            if self.log_major_actions:
+                print("Duplicated: Row " + str(row_selected + 1))
+
+        self.system_modified = False
+
+    def delete_row(self):
+        selected_items = self.tableWidget.selectedItems()
+
+        if selected_items:
+            self.system_modified = True
+            rows_to_delete = sorted(list(set(x.row() for x in selected_items)), reverse=True)
+            rows_deleted = []
+            for x in rows_to_delete:
+                self.tableWidget.removeRow(x)
+                rows_deleted.append(x + 1)
+
+            if self.log_major_actions:
+                print("Deleted: Rows " + str(rows_deleted))
+
+            self.previously_selected = x - 1
+            self.system_modified = False
+            self.tableWidget.selectRow(self.previously_selected)
+
+    def move_up(self):
+        current_row = self.table_get_selected()[0]
+
+        if current_row is not None and current_row > 0:
+            new_row = current_row - 1
+            self.move_row(current_row, new_row)
+
+    def move_down(self):
+        current_row = self.table_get_selected()[0]
+
+        if current_row is not None and current_row < self.tableWidget.rowCount() - 1:
+            new_row = current_row + 1
+            self.move_row(current_row, new_row)
+
+    def move_row(self, from_row: int, to_row: int):
+        self.system_modified = True
+
+        # Copy items from the source row to a dictionary
+        items_dict = {}
+        for col in range(self.tableWidget.columnCount()):
+            item = self.tableWidget.item(from_row, col)
+            item_cell = self.tableWidget.cellWidget(from_row, col)
+
+            if isinstance(item_cell, QCheckBox):
+                items_dict[col] = item_cell.isChecked()
+            else:
+                items_dict[col] = item.text() if item is not None else ""
+
+        # Remove the source row
+        self.tableWidget.removeRow(from_row)
+
+        # Insert a new row at the destination
+        self.tableWidget.insertRow(to_row)
+
+        # Populate the destination row with the copied items
+        for col, value in items_dict.items():
+            if isinstance(value, bool):  # If it's a checkbox
+                new_item_cell = QCheckBox()
+                new_item_cell.setChecked(value)
+                self.tableWidget.setCellWidget(to_row, col, new_item_cell)
+            else:
+                new_item = QTableWidgetItem(str(value))
+                self.tableWidget.setItem(to_row, col, new_item)
+
+        # Select the new row
+        self.tableWidget.selectRow(to_row)
+        self.system_modified = False
+
+    def browse_output_path(self):
+        # Open the 3ds Max Save File dialog
+        value = self.txtOutputPath.displayText()
+
+        file_path = rt.getSaveFileName(
+            caption="Select Image Save Location",
+            filename=value,
+            types="Image Files (*.png *.jpg *.bmp *.tga *.exr)|*.png;*.jpg;*.bmp;*.tga;*.exr|All Files (*.*)|*.*"
+        )
+
+        # Deconstruct file path (to remove additional file extensions)
+        file_type = rt.getFilenameType(file_path)
+        file_name = rt.getFilenameFile(file_path)
+        file_name = file_name.split(file_type)[0]
+        file_path = rt.getFilenamePath(file_path)
+
+        # Reconstruct file path
+        file_path = os.path.join(file_path, file_name + file_type)
+
+        # Update the text field with the selected file path
+        if file_path:
+            self.txtOutputPath.setText(file_path)
+
+        return file_path
+
+    def clear_output_path(self):
+        name_value = self.txtName.text()
+        path = self.txtDefaultOutputPath.text()
+        value = os.path.join(str(path), name_value + ".exr")
+        self.txtOutputPath.setText(value)
+
+    def start_batch_render(self):
+        if self.log_major_actions:
+            print("Starting batch render")
+
+        self.saveDialogData() # Save dialog data
+
+        def parse_number_string(number_string):
+            result = []
+
+            # Split the input string by commas
+            parts = number_string.split(',')
+
+            for part in parts:
+                # Check if the part represents a range
+                if '-' in part:
+                    start, end = map(int, part.split('-'))
+                    # Add the range of numbers to the result
+                    result.extend(range(start, end + 1))
+                else:
+                    # Add the single number to the result
+                    result.append(int(part.strip()))
+
+            return result
+
+        # Check if VRay GPU and test settings that could be unintentionally left on
+        message = None
+        vr = rt.renderers.current
+        if 'V_Ray' in str(vr):  # or "V_Ray_GPU"
+            region_enabled = rt.vrayVFBGetRegionEnabled()
+            testRes_enabled = '1' in str(rt.execute("vfbControl #testresolution"))
+            followMouse_enabled = '1' in str(rt.execute("vfbControl #trackmouse"))
+            debugShading_enabled = '1' in str(rt.execute("vfbControl #debugshading"))
+            renderSettings_open = rt.renderSceneDialog.isOpen()
+            problem_settings = {
+                'Region render': region_enabled,
+                'Test resolution': testRes_enabled,
+                'Follow mouse': followMouse_enabled,
+                'Debug shading': debugShading_enabled,
+            }
+            if True in problem_settings.values():
+                # Format warning message
+                message = [key for key, value in problem_settings.items() if value]
+                if len(message) == 1:
+                    message = message[0] + " is enabled"
+                elif len(message) == 2:
+                    message = " and ".join(message) + " are enabled"
+                elif len(message) >= 3:
+                    message = ", ".join(message[:-1]) + ", and " + message[-1] + " are enabled"
+
+            close_renderSceneDialog = False
+            if renderSettings_open:
+                rt.renderSceneDialog.commit()
+            else:
+                # Open renderSceneDialog to prevent override settings from sticking.
+                close_renderSceneDialog = True
+                rt.renderSceneDialog.open()
+                """ # no longer needed since we can renderSceneDialog.commit()
+                if message:
+                    message += ", and "
+                else:
+                    message = ''
+                message += "Render Setup dialog is open"
+                """
+
+        else:
+            message = "V-Ray is not set as current renderer!"
+
+        # Display warning
+        if message:
+            message += ". Do you want to proceed?"
+            result = self.warn_render_settings_open(message, {'Yes': True, 'No': False})
+
+            if not result:
+                return  # Dont initiate render if user cancels/closes window
+
+        # Render or skip each row
+        total_rows = self.tableWidget.rowCount()
+        canceled_renders = 0
+        max_canceled_before_exit = 2  # Set to 0 to disable canceling whole queue (not recommended)
+        for row in range(total_rows):
+            # Get entry values
+            item_values = {}
+            for column, column_name in enumerate(self.column_names):
+                item = self.tableWidget.item(row, column)
+                widget = self.tableWidget.cellWidget(row, column)
+
+                if widget:
+                    value = widget.isChecked()
+                    hidden_value = None
+                else:
+                    value = item.text()
+                    hidden_value = self.tableWidget.getHiddenValue(row, column)
+
+                item_values[column_name] = [value, hidden_value]
+
+            if item_values['Use'][0]:
+                # Get and prepare parameters
+                name = item_values['Name'][0]
+                camera_name = item_values['Camera'][0]
+                camera_ID = item_values['Camera'][1]
+                output_path = item_values['Output Path'][0]
+                frame_range = item_values['Range'][0]
+                resolution = item_values['Resolution'][0]
+                pixel_aspect = item_values['Pixel Aspect'][0]
+                scene_state_disp = item_values['Scene State'][0]
+                preset_disp = item_values['Render Preset'][0]
+                layer_preset_disp = item_values['Layer Preset'][0]
+
+                # Name
+                if name == "Default":
+                    name = camera_name
+
+                # Camera
+                camera = rt.getAnimByHandle(camera_ID)
+
+                # Output Path
+                if output_path == self.default_path_text:
+                    path = self.txtDefaultOutputPath.text()
+                    output_path = os.path.join(str(path), name + ".exr")
+
+                # Get Frames
+                if frame_range == "Default":
+                    renderTimeType = rt.rendTimeType
+                    if renderTimeType == 1:  # Single frame
+                        frame_range = [rt.currentTime.frame]
+                    elif renderTimeType == 2:  # Active time segment
+                        frame_range = range(int(rt.animationRange.start.frame), int(rt.animationRange.end.frame) + 1)
+                    elif renderTimeType == 3:  # Frame ange
+                        frame_range = range(int(rt.rendStart.frame), int(rt.rendEnd.frame) + 1, int(rt.rendNThFrame))
+                    elif renderTimeType == 4:  # Picked frames
+                        frame_range = parse_number_string(rt.rendPickupFrames)
+
+                else:
+                    frame_range = frame_range.split(':')
+                    if frame_range[0] == frame_range[-1]:  # Check if frame range is single frame "EX: 1:1"
+                        frame_range = [int(frame_range[0])]
+                    else:
+                        frame_range = [int(x) for x in frame_range]
+                        frame_range = range(frame_range[0], frame_range[-1] + 1)
+
+                # Range print display
+                if isinstance(frame_range, range):
+                    if frame_range.step == 1:
+                        frame_range_disp = f"{frame_range.start}-{frame_range.stop}"
+                    else:
+                        frame_range_disp = [str(int(x)) for x in list(frame_range)]
+                        frame_range_disp = ', '.join(frame_range_disp)
+                else:
+                    frame_range_disp = [str(int(x)) for x in list(frame_range)]
+                    frame_range_disp = ', '.join(frame_range_disp)
+
+                # Resolution
+                original_renderWidth = rt.renderWidth
+                original_renderHeight = rt.renderHeight
+                if resolution == "Default":
+                    resolution = [original_renderWidth, original_renderHeight]
+                else:
+                    resolution = resolution.split('x')
+                    #rt.renderWidth = resolution[0]
+                    #rt.renderHeight = resolution[1]
+                resolution_disp = 'x'.join(str(x) for x in resolution)
+
+                # Pixel aspect
+                original_pixel_aspect = rt.renderPixelAspect
+                if pixel_aspect == "Default":
+                    pixel_aspect = original_pixel_aspect
+                else:
+                    rt.renderPixelAspect = pixel_aspect
+
+                # Scene state (Makes changes)
+                if scene_state_disp:
+                    rt.sceneStateMgr.RestoreAllParts(scene_state_disp)  # Restore scene state
+                else:
+                    scene_state_disp = None
+
+                # Render preset (Makes changes)
+                if preset_disp:
+                    file_path = rt.GetDir(rt.Name("renderPresets"))
+                    file_path = os.path.join(file_path, preset_disp)
+                    rt.renderPresets.LoadAll(0, file_path)  # Restore render preset
+                else:
+                    preset_disp = None
+
+                # Layer preset (Makes changes)
+                if layer_preset_disp:
+                    file_path = rt.GetDir(rt.Name("vpost"))
+                    file_path = os.path.join(file_path, layer_preset_disp)
+                    rt.vfbLayerMgr.loadLayersFromFile(file_path)  # Set layer preset
+                else:
+                    layer_preset_disp = None
+
+                print(
+                    f"Rendering: [{str(row + 1)}] {name} | {camera_name} | {resolution_disp} | {frame_range_disp} | "
+                    f"{str(pixel_aspect)} | {scene_state_disp} | {preset_disp} | {layer_preset_disp}")
+
+                # Do rendering
+                total_frames = len(frame_range)
+                for x, frame in enumerate(frame_range):
+                    directory, full_filename = os.path.split(output_path)
+                    filename, file_extension = os.path.splitext(full_filename)
+                    outputfile = os.path.join(directory, f"{filename}_{int(frame):04d}{file_extension}")
+                    directory, full_filename = os.path.split(outputfile)
+                    print(f"Rendering frame {frame} ({x + 1}/{total_frames}) {full_filename}")
+
+                    # Error checking
+                    try:
+                        error = False
+                        os.path.normpath(outputfile)
+                    except ValueError:
+                        print("Path has invalid characters!")
+                        error = True
+
+                    debug_disable_render = False
+                    if not debug_disable_render and not error:  # Set false for debug if needed
+                        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+                        r = rt.render(
+                            camera=camera,
+                            frame=frame,
+                            outputwidth=int(resolution[0]),
+                            outputheight=int(resolution[1]),
+                            pixelaspect=pixel_aspect,
+                            outputfile=outputfile,
+                            vfb=False,
+                            progressbar=False,
+                            # cancelled = render_canceled, # Cant figure out how to use in python
+                            to=rt.Bitmap(1, 1)
+                        )
+
+                    # Check if render was canceled
+                    # isn't needed if 'cancelled' above works. Also,
+                    # might not differentiate between canceled and failed.
+                    was_canceled = False
+                    if os.path.exists(outputfile):
+                        # If file exists, check weather it was modified recently
+                        last_modified_time = os.path.getmtime(outputfile)
+                        current_time = time.time()
+                        time_difference = current_time - last_modified_time
+                        was_canceled = time_difference <= 0.5
+                    elif not debug_disable_render:
+                        # If no file exists, render was canceled
+                        was_canceled = True
+
+                    if not was_canceled:
+                        print(f"Done! Output path: {outputfile}")
+                    else:
+                        canceled_renders += 1
+                        print("Render canceled or failed!")
+
+                    if max_canceled_before_exit and canceled_renders >= max_canceled_before_exit:
+                        break
+
+                # Reset render settings back to their original values
+                rt.renderWidth = original_renderWidth
+                rt.renderHeight = original_renderHeight
+
+                if max_canceled_before_exit and canceled_renders >= max_canceled_before_exit:
+                    print("Canceled render queue!")
+                    break
+
+        if close_renderSceneDialog:
+            rt.renderSceneDialog.cancel()
+
+        print("Rendering done!")
+        self.setWindowFlag(Qt.WindowStaysOnTopHint)
+
+    """Functions for when "Selected Batch Render Parameters" changed"""
+
+    def output_path_override_toggled(self, state: bool):
+        """Triggers when field in parameters (Not table) gets toggled"""
+        if self.log_functions:
+            print("output_path_override_toggled")
+
+        if not self.system_modified:
+            current_value = self.txtOutputPath.text()
+            if not current_value:
+                self.clear_output_path()
+
+            self.output_path_changed()
+            self.toggle_override_fields(state, 'Output Path')
+
+    def frame_range_override_toggled(self, state: bool):
+        """Triggers when field in parameters (Not table) gets toggled"""
+        if self.log_functions:
+            print("frame_range_override_toggled")
+
+        if not self.system_modified:
+            self.frame_range_changed()
+            self.toggle_override_fields(state, 'Frame Range')
+
+    def image_size_override_toggled(self, state: bool):
+        """Triggers when field in parameters (Not table) gets toggled"""
+        if self.log_functions:
+            print("image_size_override_toggled")
+
+        if not self.system_modified:
+            self.resolution_changed()
+            self.toggle_override_fields(state, 'Image Size')
+
+    def pixel_aspect_override_toggled(self, state: bool):
+        """Triggers when field in parameters (Not table) gets toggled"""
+        if self.log_functions:
+            print("pixel_aspect_override_toggled")
+
+        if not self.system_modified:
+            self.pixel_aspect_changed()
+            self.toggle_override_fields(state, 'Pixel Aspect')
+
+    def frame_range_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("frame_range_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+            value = "Default"
+            if self.frameRangeOverride.checkState():
+                value = str(self.spnFrameStart.value()) + ":" + str(self.spnFrameEnd.value())
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Range")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+                    self.tableWidget.setItem(row, col, new_item)
+
+            if self.log_major_actions:
+                print("Frame Range changed")
+            self.system_modified = False
+
+    def resolution_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("resolution_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+            value = "Default"
+            if self.imageSizeOverride.checkState():
+                value = str(self.spnWidth.value()) + "x" + str(self.spnHeight.value())
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Resolution")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+                    self.tableWidget.setItem(row, col, new_item)
+
+            if self.log_major_actions:
+                print("Resolution changed")
+            self.system_modified = False
+
+    def pixel_aspect_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("pixel_aspect_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+            value = "Default"
+            if self.pixelAspectOverride.checkState():
+                value = str(self.spnPixelAspect.value())
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Pixel Aspect")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+                    self.tableWidget.setItem(row, col, new_item)
+
+            if self.log_major_actions:
+                print("Pixel Aspect changed")
+
+            self.system_modified = False
+
+    def name_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("name_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+            value = self.txtName.text()
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Name")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+
+                    self.tableWidget.setItem(row, col, new_item)
+
+                    if not self.outputPathOverride.checkState():
+                        # Set Output Path
+                        path = rt.GetDir(rt.Name("renderoutput"))
+                        path = os.path.join(str(path), str(value) + ".exr")
+                        path_value = QTableWidgetItem(path)
+                        col = self.column_names.index("Output Path")
+                        if self.outputPathOverride.isChecked():
+                            path_value = self.txtOutputPath.text()
+                        else:
+                            path_value = QTableWidgetItem(self.default_path_text)
+                        self.tableWidget.setItem(row, col, path_value)
+
+            if self.log_major_actions:
+                print("Name changed")
+            self.system_modified = False
+
+    def output_path_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("output_path_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+
+            if self.outputPathOverride.isChecked():
+                value = self.txtOutputPath.text()
+            else:
+                value = self.default_path_text
+
+            selected = self.table_get_selected(None)
+            if selected != (None, None):
+                for selection in selected:
+                    row = selection[0]
+                    col = self.column_names.index("Output Path")
+                    existing_item = self.tableWidget.item(row, col)
+
+                    if existing_item is not None:
+                        # Create a new item with the existing attributes and set the new text
+                        new_item = QTableWidgetItem(existing_item)
+                        new_item.setText(value)
+                        self.tableWidget.setItem(row, col, new_item)
+
+            self.system_modified = False
+
+    def camera_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("camera_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+            camera_Name = self.cmbCamera.currentText()
+            current_index = self.cmbCamera.currentIndex()
+            camera_ID = self.cmbCamera.itemData(current_index)
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Camera")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(camera_Name)
+                    self.tableWidget.setCellData(row, col, new_item, camera_ID)  # .setItem(row, col, new_item)
+                    #print(f"#####{camera_Name} | {camera_ID}")
+
+            if self.log_major_actions:
+                print("Camera changed")
+
+            self.system_modified = False
+
+    def scene_state_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("scene_state_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+            value = self.cmbSceneState.currentText()
+            if value == self.default_text:
+                value = ""
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Scene State")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+                    self.tableWidget.setItem(row, col, new_item)
+
+            if self.log_major_actions:
+                print("Scene State changed")
+
+            self.system_modified = False
+
+    def preset_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("preset_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+
+            value = self.cmbPreset.currentText()
+            if value == self.default_text:
+                value = ""
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Render Preset")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+                    self.tableWidget.setItem(row, col, new_item)
+
+            if self.log_major_actions:
+                print("Preset changed")
+
+            self.system_modified = False
+
+    def layer_preset_changed(self):
+        """Triggers when field in parameters (Not table) gets changed"""
+        if self.log_functions:
+            print("layer_preset_changed")
+
+        if not self.system_modified:
+            self.system_modified = True
+
+            value = self.cmbLayerPreset.currentText()
+            if value == self.default_text:
+                value = ""
+
+            for selection in self.table_get_selected(None):
+                row = selection[0]
+                col = self.column_names.index("Layer Preset")
+                existing_item = self.tableWidget.item(row, col)
+
+                if existing_item is not None:
+                    # Create a new item with the existing attributes and set the new text
+                    new_item = QTableWidgetItem(existing_item)
+                    new_item.setText(value)
+                    self.tableWidget.setItem(row, col, new_item)
+
+            if self.log_major_actions:
+                print("Layer Preset changed")
+
+            self.system_modified = False
+
+
+if __name__ == "__main__":
+    # Run script
+    dialog = BatchRenderDialog()
+    dialog.exec_()

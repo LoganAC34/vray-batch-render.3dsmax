@@ -1,0 +1,41 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"launch": {
+        "configurations": [
+			{
+				"type": "attachlisp",
+				"request": "attach",
+				"name": "AutoLISP Debug: Attach",
+				"attributes": {
+					"//": "This configuration has been deprecated. Instead use the Debug: Attach Process setting of the AutoCAD AutoLISP Extension."
+				}
+			},
+            {
+				"name": "Python: Remote Attach",
+				"type": "python",
+				"request": "attach",
+				"justMyCode": true,
+				"connect": {
+					"host": "localhost",
+					"port": 5678
+				},
+				"pathMappings": [
+					{
+						"localRoot": "${workspaceFolder}",
+						"remoteRoot": "${workspaceFolder}",
+					}
+				]
+			}
+        ]
+    },
+	"settings": {
+		"python.pythonPath": "C:\\Program Files\\Autodesk\\3ds Max 2025\\Python\\python.exe",
+		"python.autoComplete.extraPaths": ["C:\\Program Files\\Autodesk\\3ds Max 2025\\Python\\Lib\\site-packages"],
+		"python.analysis.extraPaths": ["C:\\Program Files\\Autodesk\\3ds Max 2025\\Python\\Lib\\site-packages"],
+		"python.defaultInterpreterPath": "\"C:\\Program Files\\Autodesk\\3ds Max 2025\\Python\\python.exe\""
+	}
+}

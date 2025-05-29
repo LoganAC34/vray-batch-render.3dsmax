@@ -1,0 +1,34 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="LongLine" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="ProblematicWhitespace" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyAugmentAssignmentInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyClassicStyleClassInspection" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyMandatoryEncodingInspection" enabled="true" level="WARNING" enabled_by_default="true" />
+    <inspection_tool class="PyPep8NamingInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="N806" />
+          <option value="N802" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyUnresolvedReferencesInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredIdentifiers">
+        <list>
+          <option value="pythoncom.CoCreateInstance" />
+          <option value="pythoncom.CLSCTX_INPROC_SERVER" />
+          <option value="sys._MEIPASS" />
+          <option value="RevitServices.Transactions.TransactionManager.Instance" />
+          <option value="System.IO.Path" />
+          <option value="Project.bin.Scripts.Writing.ProgressBarUtils" />
+          <option value="ProgressBarUtils" />
+          <option value="Project.bin.Scripts.Writing.IN" />
+          <option value="Project.bin.Scripts.Writing.UnwrapElement" />
+          <option value="PIL.Image.Image.filename" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
