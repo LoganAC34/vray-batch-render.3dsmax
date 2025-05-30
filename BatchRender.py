@@ -1316,14 +1316,21 @@ class BatchRenderDialog(qt_widgets.QDialog):
 
         # Copy items from the source row to a dictionary
         items_dict = {}
-        for col in range(self.tableWidget.columnCount()):
+        for col, column_name in enumerate(self.column_names):
+            column_name = column_name.replace(' ', '_')
             item = self.tableWidget.item(from_row, col)
             item_cell = self.tableWidget.cellWidget(from_row, col)
 
-            if isinstance(item_cell, qt_widgets.QCheckBox):
-                items_dict[col] = item_cell.isChecked()
+            if item_cell:
+                # noinspection PyUnresolvedReferences
+                value = item_cell.isChecked()
+                hidden_value = None
             else:
-                items_dict[col] = item.text() if item is not None else ""
+                value = item.text()
+                hidden_value = self.tableWidget.getHiddenValue(from_row, col)
+
+            items_dict[column_name] = value
+            items_dict[column_name + '_Hidden'] = hidden_value
 
         # Remove the source row
         self.tableWidget.removeRow(from_row)
@@ -1332,14 +1339,16 @@ class BatchRenderDialog(qt_widgets.QDialog):
         self.tableWidget.insertRow(to_row)
 
         # Populate the destination row with the copied items
-        for col, value in items_dict.items():
-            if isinstance(value, bool):  # If it's a checkbox
+        for col, column_name in enumerate(self.column_names):
+            column_name = column_name.replace(' ', '_')
+            value = items_dict[column_name.replace(' ', '_')]
+            if isinstance(value, bool):  # Checkbox
                 new_item_cell = qt_widgets.QCheckBox()
                 new_item_cell.setChecked(value)
                 self.tableWidget.setCellWidget(to_row, col, new_item_cell)
-            else:
+            else: # Text or some other value
                 new_item = qt_widgets.QTableWidgetItem(str(value))
-                self.tableWidget.setItem(to_row, col, new_item)
+                self.tableWidget.setCellData(to_row, col, new_item, items_dict[column_name + '_Hidden'])
 
         # Select the new row
         self.tableWidget.selectRow(to_row)
@@ -1721,6 +1730,8 @@ class BatchRenderDialog(qt_widgets.QDialog):
             vray_log_error = None
             time_of_render = datetime.now()
             self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+
+            rt.execute("vfbControl #clearimage")
 
             r, canceled = rt.render(
                 camera=camera,
