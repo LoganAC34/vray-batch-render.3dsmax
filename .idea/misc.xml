@@ -3,8 +3,7 @@
   <component name="Black">
     <option name="cmdArguments" value="-l 95" />
     <option name="enabledOnReformat" value="true" />
-    <option name="executionMode" value="BINARY" />
-    <option name="pathToExecutable" value="X:\Preferences\3ds Max\3ds Max Files\Scripts\Logan\BatchRender\black_windows.exe" />
+    <option name="enabledOnSave" value="true" />
     <option name="sdkName" value="Python 3.11 (BatchRender)" />
   </component>
   <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.11 (BatchRender)" project-jdk-type="Python SDK" />
