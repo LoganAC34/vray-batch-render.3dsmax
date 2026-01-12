@@ -1,0 +1,3 @@
+debugpy~=1.8.19
+pymxs~=28.3.0
+PySide6~=6.5.3
