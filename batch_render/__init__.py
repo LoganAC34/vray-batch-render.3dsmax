@@ -16,7 +16,7 @@ Example usage:
 from .main import BatchRenderDialog
 from .config import Config
 
-__all__ = ["BatchRenderDialog"]
-
 __version__ = Config.APP_VERSION
 __author__ = Config.AUTHOR
+
+__all__ = ["BatchRenderDialog", "Config"]

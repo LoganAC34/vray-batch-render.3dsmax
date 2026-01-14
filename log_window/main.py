@@ -6,27 +6,16 @@ Feature wishlist:
 - Rich text support
 """
 
-import argparse
-import json
 import os
 import subprocess
-import sys
 import traceback
 from contextlib import contextmanager
-from pathlib import Path
 from typing import ContextManager
 
-import pywintypes
-import win32event
-import win32file
-import win32pipe
-import winerror
-from PySide6.QtWidgets import *
-
-from .window import LogWindow
-from .config import AppInfo, VerboseLevel, CommandType, Commands, PIPE_TIMEOUT
-
 CMD_ERROR = False
+
+from .config import AppInfo, VerboseLevel
+from .window import LogWindow
 
 
 class Console:
@@ -35,60 +24,11 @@ class Console:
     LOG_INDENT_SPACING = "   "
     PIPE_NAME = rf"\\.\pipe\{AppInfo.APP_NAME}_{os.getpid()}"
 
-    def __init__(self, show_log: bool = False) -> None:
+    def __init__(self) -> None:
+        self.window = LogWindow()
         self._verbose_level = VerboseLevel.INFO
         self._indent_level = 0
-        self.show_log = show_log
-        self.pipe_path = self._setup_log()
-
-    # Log functions
-    def _setup_log(self) -> int:
-        """Initializes and starts the log window
-        Returns:
-            pipe_handle: Pipe path
-        """
-        # noinspection PyTypeChecker
-        pipe_handle = win32pipe.CreateNamedPipe(
-            self.PIPE_NAME,
-            win32pipe.PIPE_ACCESS_DUPLEX | win32file.FILE_FLAG_OVERLAPPED,
-            win32pipe.PIPE_TYPE_MESSAGE
-            | win32pipe.PIPE_READMODE_MESSAGE
-            | win32pipe.PIPE_WAIT,
-            1,
-            512,
-            512,
-            10,
-            None,
-        )
-
-        overlapped = pywintypes.OVERLAPPED()
-        overlapped.hEvent = win32event.CreateEvent(None, 0, 0, None)
-
-        # Start the log window
-        creation_flags = (
-            subprocess.CREATE_NEW_CONSOLE if self.show_log else subprocess.CREATE_NO_WINDOW
-        )
-        script_path = Path(__file__).absolute()
-        # noinspection PyUnresolvedReferences
-        arguments = [sys.executable, str(script_path), "--pipe", self.PIPE_NAME]
-
-        subprocess.Popen(arguments, creationflags=creation_flags)
-
-        try:
-            win32pipe.ConnectNamedPipe(pipe_handle, overlapped)
-        except pywintypes.error as e:
-            if e.winerror != winerror.ERROR_IO_PENDING:
-                raise
-
-        # Wait for 3000ms (3 seconds)
-        wait_result = win32event.WaitForSingleObject(overlapped.hEvent, PIPE_TIMEOUT)
-
-        if wait_result == win32event.WAIT_TIMEOUT:
-            win32file.CloseHandle(pipe_handle)
-            raise Exception("Pipe connection timed out")
-        elif wait_result == win32event.WAIT_OBJECT_0:
-            return pipe_handle
-        raise Exception("Failed to connect to named pipe")
+        print("Console was run")
 
     # noinspection PyTypeChecker
     @contextmanager
@@ -103,32 +43,6 @@ class Console:
             yield
         finally:
             self._indent_level -= 1
-
-    @staticmethod
-    def _check_command_type_and_data(data_type: CommandType, data: str | Commands):
-        """Checks if the data type and command are valid.
-        Args:
-            data_type: Data type
-            data: Data to send
-
-        Raises:
-            ValueError: If the data type or command is not valid.
-        """
-        if data_type not in list(CommandType):
-            raise ValueError(f"Invalid data type: {data_type}")
-
-        if data_type == CommandType.COMMAND and data not in list(Commands):
-            raise ValueError(f"Invalid command: {data}")
-
-    def _write_to_pipe(self, data_type: CommandType, data_str: str | Commands):
-        """Writes data to the pipe.
-        Args:
-            data_str: Data to send
-            data_type: Data type
-        """
-        self._check_command_type_and_data(data_type, data_str)
-        data_json = json.dumps({"TYPE": data_type.value, "VALUE": data_str})
-        win32file.WriteFile(self.pipe_path, (data_json + "\n").encode("utf-8"))
 
     @staticmethod
     def _verbose_level_check(level: VerboseLevel) -> None:
@@ -165,16 +79,16 @@ class Console:
         self._verbose_level_check(level)
         if level >= self._verbose_level:
             message = (self.LOG_INDENT_SPACING * self._indent_level) + str(text)
-            self._write_to_pipe(CommandType.LOG, message)
+            self.window.log_message(message)
 
     def open(self) -> None:
         """Restores the log window if it was closed."""
-        self._write_to_pipe(CommandType.COMMAND, Commands.OPEN)
+        self.window.hide()
+        self.window.show()
 
-    def shutdown(self) -> None:
+    def close(self) -> None:
         """Shut down the log window."""
-        self._write_to_pipe(CommandType.COMMAND, Commands.SHUTDOWN)
-        win32file.CloseHandle(self.pipe_path)
+        self.window.close()
 
 
 def excepthook(error_type, error, traceback_str):
@@ -215,7 +129,7 @@ def excepthook(error_type, error, traceback_str):
 
 
 def test():
-    console = Console(True)
+    console = Console()
     console.log(VerboseLevel.DEBUG, "Debug mode enabled")
     with console.indent():
         console.log(VerboseLevel.DEBUG, "Debug mode enabled")
@@ -224,21 +138,10 @@ def test():
             console.log(VerboseLevel.DEBUG, "Debug mode enabled")
     console.log(VerboseLevel.DEBUG, "Debug mode enabled")
     console.open()
-    console.shutdown()
+    console.close()
     pass
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument("--show", action="store_true")
-    parser.add_argument("--pipe", type=str)
-    args = parser.parse_args()
-
-    if args.debug:
-        test()
-    else:
-        app = QApplication()
-        window = LogWindow(args.pipe)
-        window.show()
-        sys.exit(app.exec())
+    # test() # imports broken
+    pass

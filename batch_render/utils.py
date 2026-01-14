@@ -2,11 +2,10 @@
 
 import uuid
 
-import pymxs
-
 from .config import Config
 
-# noinspection PyUnresolvedReferences
+import pymxs
+
 rt = pymxs.runtime
 
 

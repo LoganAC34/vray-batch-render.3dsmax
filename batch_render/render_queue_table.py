@@ -5,11 +5,9 @@ import re
 from PySide6 import QtWidgets as QtWidgets
 from PySide6.QtCore import Qt
 
-from log_window import Console, VerboseLevel
 from .config import Config
 from .widgets import CustomTableWidgetItem, TruncateDelegateMiddle, TruncateDelegateRight
-
-console = Console()
+from log_window import console, VerboseLevel
 
 
 class Column:
@@ -96,14 +94,14 @@ class Columns(metaclass=ColumnMeta):
     @property
     def names(self) -> list[str]:
         """Get column names."""
-        return [column.value.column_name for column in self._all_columns]
+        return [column.name for column in self._all_columns]
 
     @classmethod
     def replace_tags(cls, string: str, properties: dict[str, str]) -> tuple[str, bool]:
         """Replace tags in string."""
         blank_values = False
         for column in cls._all_columns:
-            for tag in column.value.tags:
+            for tag in column.tags:
                 if tag in string.lower():
                     property_value = properties[column.name]
                     if property_value.lower() in [None, "default", ""]:
@@ -120,7 +118,7 @@ class Columns(metaclass=ColumnMeta):
         all_tags = []
 
         for column in cls._all_columns:
-            all_tags.extend(column.value.tags)
+            all_tags.extend(column.tags)
 
         return prefix + ", ".join(all_tags)
 
@@ -137,15 +135,14 @@ columns = Columns()
 class RenderQueueTable(QtWidgets.QTableWidget):
     """Render queue table."""
 
-    def __init__(self, logger: Console = console):
-        self.parent = super().__init__()
-        global console
-        console = logger
+    def __init__(self, parent=None):
+        super().__init__()
+        self.parent = parent
 
         self.system_modified = False
         self.previously_selected = None
-        self.setup_columns()
-        self.setup_style()
+        self._setup_columns()
+        self._setup_style()
 
     def setCellData(self, row, column, display_value, hidden_value):
         """Set cell data."""
@@ -162,7 +159,7 @@ class RenderQueueTable(QtWidgets.QTableWidget):
 
     """Setup functions"""
 
-    def setup_columns(self):
+    def _setup_columns(self):
         """Setup table columns."""
         self.setColumnCount(len(columns.names))
         self.setHorizontalHeaderLabels(columns.names)
@@ -180,7 +177,7 @@ class RenderQueueTable(QtWidgets.QTableWidget):
         header = self.horizontalHeader()
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Fixed)
 
-    def setup_style(self):
+    def _setup_style(self):
         """Setup table style."""
         self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior(1))
         self.setStyleSheet("QTableWidget::item:selected {background-color: #3498db;}")
@@ -198,7 +195,7 @@ class RenderQueueTable(QtWidgets.QTableWidget):
         else:
             raise ValueError
 
-        for c in column_names:
+        for c, _ in enumerate(column_names):
             self.resizeColumnToContents(c)
             column_width = self.columnWidth(c)
             self.setColumnWidth(c, column_width + 4)
@@ -296,9 +293,9 @@ class RenderQueueTable(QtWidgets.QTableWidget):
         self.setItem(row_position, col, default)
 
         # Check if the current column is the one you want to make non-editable
-        for col in columns:
+        for col, column in enumerate(columns):
             item = self.item(row_position, col)
-            if item is not None and col.editable:
+            if item is not None and column.editable:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
 
         self.resize_column_to_contents()
@@ -489,23 +486,30 @@ class RenderQueueTable(QtWidgets.QTableWidget):
             if selected_items is not None:
                 self.previously_selected = selected_items
                 console.log(
-                    VerboseLevel.DEBUG, "Selected: Row " + str(self.previously_selected + 1)
+                    VerboseLevel.DEBUG,
+                    "Selected: Row " + str(self.previously_selected + 1),
                 )
 
             elif self.previously_selected is not None:
                 console.log(
-                    VerboseLevel.DEBUG, "No element selected, but previous element selected"
+                    VerboseLevel.DEBUG,
+                    "No element selected, but previous element selected",
                 )
                 self.system_modified = True
                 self.selectRow(self.previously_selected)
 
             else:
                 console.log(
-                    VerboseLevel.DEBUG, "No element selected, and no previous element selected"
+                    VerboseLevel.DEBUG,
+                    "No element selected, and no previous element selected",
                 )
                 self.previously_selected = self.rowCount()
                 self.system_modified = True
                 self.selectRow(self.previously_selected)
 
             self.system_modified = False
-            self.update_element_values()
+            self.parent.update_element_values()
+
+
+if __name__ == "__main__":
+    pass

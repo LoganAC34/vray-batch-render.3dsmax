@@ -4,7 +4,7 @@
     <option name="cmdArguments" value="-l 95" />
     <option name="enabledOnReformat" value="true" />
     <option name="enabledOnSave" value="true" />
-    <option name="sdkName" value="Python 3.11 (BatchRender)" />
+    <option name="sdkName" value="Python 3.11 (3ds Max)" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.11 (BatchRender)" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Python 3.11 (3ds Max)" project-jdk-type="Python SDK" />
 </project>

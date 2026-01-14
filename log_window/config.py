@@ -34,17 +34,3 @@ class VerboseLevel(IntEnum):
     INFO = auto()
     WARNING = auto()
     DEBUG = auto()
-
-
-class CommandType(StrEnum):
-    """Dataclass for command type for sending data to log window"""
-
-    COMMAND = "command"
-    LOG = "log"
-
-
-class Commands(StrEnum):
-    """Dataclass for commands for sending data to log window"""
-
-    OPEN = "open"
-    SHUTDOWN = "shutdown"

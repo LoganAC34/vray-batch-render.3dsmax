@@ -17,15 +17,16 @@ Feature wishlist:
 - Be able to toggle multiple render entries at once
 """
 
-from .config import Config
-from .utils import *
-from .widgets import GenericDialog
-from .render_queue_table import RenderQueueTable, Columns
-
 import os
 
 # https://forums.autodesk.com/t5/3ds-max-programming/installing-python-modules/td-p/6522899
 import sys
+
+from log_window import VerboseLevel, console
+from .render_queue_table import RenderQueueTable, Columns
+from .utils import *
+from .widgets import GenericDialog
+from .config import Config
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
@@ -35,7 +36,6 @@ import winreg
 from pathlib import Path
 from typing import Tuple, Any
 
-from log_window import VerboseLevel, Console
 
 import json
 import re
@@ -43,13 +43,12 @@ import tempfile
 import time
 from datetime import datetime
 
-# noinspection PyUnresolvedReferences
-import pymxs
-
 from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 from PySide6.QtCore import *
 from PySide6 import QtWidgets as QtWidgets
 
+# noinspection PyUnresolvedReferences
+import pymxs
 
 # noinspection PyUnresolvedReferences
 rt = pymxs.runtime
@@ -61,8 +60,14 @@ PROJECT_ROOT_PATH = rt.pathConfig.getCurrentProjectFolder()
 
 
 class BatchRenderDialog(QtWidgets.QDialog):
+    """Main batch render dialog"""
+
     def __init__(self, parent=None):
         super(BatchRenderDialog, self).__init__(parent)
+        self.setModal(False)  # Make it non-modal
+        # noinspection PyUnresolvedReferences
+        self.setWindowModality(Qt.NonModal)
+
         self.stateSet_prefix = "State Set: "
         self.sceneState_prefix = "Scene State: "
         self.script_path = os.path.dirname(__file__)
@@ -81,6 +86,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
 
         # Build the GUI
         self._build_gui()
+        console.verbose_level = VerboseLevel.DEBUG
         console.open()
 
     """Dialog Functions"""
@@ -142,7 +148,7 @@ class BatchRenderDialog(QtWidgets.QDialog):
         defaultOutputPathLayout.addWidget(self.btnDefaultClear)
 
         # Table
-        self.tableWidget = RenderQueueTable()  # QTableWidget(self)
+        self.tableWidget = RenderQueueTable(self)
 
         # Selected Parameters GroupBox
         self.groupBoxSelectedParams = QtWidgets.QGroupBox(
@@ -405,7 +411,8 @@ class BatchRenderDialog(QtWidgets.QDialog):
         self.btnAddCameraSceneCombos.clicked.connect(self.add_camera_sceneStateSet_combos)
 
         # Binds - Windows Events
-        self.finished.connect(self.on_close)
+        # self.finished.connect(self.on_close)
+        # self.destroyed.connect(self.on_close)
 
         # Disable overrides (default state)
         self.toggle_override_fields(False)
@@ -505,9 +512,9 @@ class BatchRenderDialog(QtWidgets.QDialog):
         in the widget."""
         console.log(VerboseLevel.DEBUG, "Ignoring Enter/Return key")
 
-    def on_close(self):
-        # Do things on window close
+    def closeEvent(self, event) -> None:
         self.saveDialogData()
+        console.close()
 
     def restoreWindowSettings(self):
         # Restore window position & size

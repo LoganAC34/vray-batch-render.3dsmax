@@ -22,9 +22,26 @@ Example usage:
 """
 
 import sys
+from typing import Optional
 
-from .main import Console, excepthook, test
-from .config import VerboseLevel, CommandType, Commands, AppInfo
+from .main import Console, excepthook
+from .config import VerboseLevel, AppInfo
+
+# Initialize console as None and provide a getter function
+_console: Optional[Console] = None
+
+
+def get_console() -> Console:
+    """Get or create the console instance."""
+    global _console
+    if _console is None:
+        print("Initializing console...")
+        _console = Console()
+    return _console
+
+
+# Create a property-like accessor for backward compatibility
+console = get_console()
 
 __version__ = AppInfo.APP_VERSION
 __author__ = AppInfo.AUTHOR
@@ -33,11 +50,8 @@ __author__ = AppInfo.AUTHOR
 sys.excepthook = excepthook
 
 __all__ = [
-    "Console",
+    "console",
+    "get_console",
     "VerboseLevel",
-    "CommandType",
-    "Commands",
     "AppInfo",
-    "excepthook",
-    "test",
 ]
