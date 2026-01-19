@@ -1,3 +1,5 @@
+<a href="https://github.com/psf/black"><img alt="Code style: black" src="https://img.shields.io/badge/code%20style-black-000000.svg"></a>
+
 This script is an extended functionality version of the standard 3ds Max batch render dialog.
 
 It adds:
