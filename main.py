@@ -4,6 +4,8 @@ import argparse
 import os
 import sys
 
+from mocks import pymxs
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -14,9 +16,8 @@ if __name__ == "__main__":
 
     if args.debug:
         print("Debug mode enabled")
-        import mocks.pymxs
 
-        sys.modules["pymxs"] = mocks.pymxs
+        sys.modules["pymxs"] = pymxs
 
 # Add the project root to Python path
 project_root = os.path.dirname(os.path.abspath(__file__))
