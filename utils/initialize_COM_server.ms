@@ -3,7 +3,7 @@
 		Simon Felton's MXSCOM bridge to work.
 		IF RUNNING THIS SCRIPT ON AN VERSION OF MAX OLDER THAN MAX 10
 		THE AVG EXTENSION *MUST* BE INSTALLED
-	../.idea/
+	../../../.idea/
 
 	local reg_key
 	local max_version = ((maxVersion())[1] / 1000) as string
